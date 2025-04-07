@@ -1,3 +1,5 @@
 *.o
 chat
 dh-example
+mykey
+mykey.pub

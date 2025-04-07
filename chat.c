@@ -9,6 +9,7 @@
 #include <getopt.h>
 #include "dh.h"
 #include "keys.h"
+#include "util.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 1024
@@ -32,10 +33,98 @@ void* recvMsg(void*);       /* for trecv */
 static int listensock, sockfd;
 static int isclient = 1;
 
+static dhKey longTermKey;
+static dhKey ephemeralKey;
+
+// Shared session key
+static unsigned char sessionKey[128];
+
+// Track handshake status
+static int handshakeComplete = 0;
+
 static void error(const char *msg)
 {
 	perror(msg);
 	exit(EXIT_FAILURE);
+}
+
+static int performHandshake(int isClient) {
+	// Init keys
+	if (initKey(&longTermKey) != 0 || initKey(&ephemeralKey) != 0) {
+		fprintf(stderr, "Failed to initialize keys\n");
+		return -1;
+	}
+
+	// Generate long-term key pair if we don't have one
+	if (access("mykey.pub", F_OK) != 0) {
+		// Generate new long-term key
+		dhGen(longTermKey.SK, longTermKey.PK);
+		strncpy(longTermKey.name, "mychat", MAX_NAME);
+		// write file stuff
+		writeDH("mykey", &longTermKey);
+	} else {
+		// have long-trem key just load existing
+		readDH("mykey", &longTermKey);
+	}
+
+	// Generate ephemeral key pair for this session
+	dhGen(ephemeralKey.SK, ephemeralKey.PK);
+	strncpy(ephemeralKey.name, "ephemeral", MAX_NAME);
+
+	// Exchange keys based on role
+	if (isClient) {
+		// Client sends its keys first
+		serialize_mpz(sockfd, longTermKey.PK);
+		serialize_mpz(sockfd, ephemeralKey.PK);
+		
+		// Receive server's keys
+		dhKey serverLongTermKey, serverEphemeralKey;
+		initKey(&serverLongTermKey);
+		initKey(&serverEphemeralKey);
+		
+		deserialize_mpz(serverLongTermKey.PK, sockfd);
+		deserialize_mpz(serverEphemeralKey.PK, sockfd);
+		
+		// Generate session key using 3DH
+		dh3Final(longTermKey.SK, longTermKey.PK,
+				ephemeralKey.SK, ephemeralKey.PK,
+				serverLongTermKey.PK, serverEphemeralKey.PK,
+				sessionKey, sizeof(sessionKey));
+				
+		shredKey(&serverLongTermKey);
+		shredKey(&serverEphemeralKey);
+	} else {
+		// Server receives client's keys first
+		dhKey clientLongTermKey, clientEphemeralKey;
+		initKey(&clientLongTermKey);
+		initKey(&clientEphemeralKey);
+		
+		deserialize_mpz(clientLongTermKey.PK, sockfd);
+		deserialize_mpz(clientEphemeralKey.PK, sockfd);
+		
+		// Send server's keys
+		serialize_mpz(sockfd, longTermKey.PK);
+		serialize_mpz(sockfd, ephemeralKey.PK);
+		
+		// Generate session key using 3DH
+		dh3Final(longTermKey.SK, longTermKey.PK,
+				ephemeralKey.SK, ephemeralKey.PK,
+				clientLongTermKey.PK, clientEphemeralKey.PK,
+				sessionKey, sizeof(sessionKey));
+				
+		shredKey(&clientLongTermKey);
+		shredKey(&clientEphemeralKey);
+	}
+
+	handshakeComplete = 1;
+	
+	// checking if session key was generated
+	if (sessionKey[0] == 0) {
+		fprintf(stderr, "Handshake failed: Session key not generated\n");
+		return -1;
+	}
+	
+	return 0;
 }
 
 int initServerNet(int port)
@@ -63,6 +152,11 @@ int initServerNet(int port)
 	close(listensock);
 	fprintf(stderr, "connection made, starting session...\n");
 	/* at this point, should be able to send/recv on sockfd */
+	if (performHandshake(0) != 0) {
+		error("Handshake failed");
+		return -1;
+	}
+	fprintf(stderr, "Handshake completed successfully\n");
 	return 0;
 }
 
@@ -85,6 +179,11 @@ static int initClientNet(char* hostname, int port)
 	if (connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0)
 		error("ERROR connecting");
 	/* at this point, should be able to send/recv on sockfd */
+	if (performHandshake(1) != 0) {
+		error("Handshake failed");
+		return -1;
+	}
+	fprintf(stderr, "Handshake completed successfully\n");
 	return 0;
 }
 
@@ -144,6 +243,10 @@ static void tsappend(char* message, char** tagnames, int ensurenewline)
 
 static void sendMessage(GtkWidget* w /* <-- msg entry widget */, gpointer /* data */)
 {
+	if (!handshakeComplete) {
+		tsappend("Error: Handshake not complete\n", NULL, 1);
+		return;
+	}
 	char* tags[2] = {"self",NULL};
 	tsappend("me: ",tags,0);
 	GtkTextIter mstart; /* start of message pointer */
