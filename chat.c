@@ -13,6 +13,7 @@
 
 #include <openssl/rand.h> /* for generating random IVs */
 #include <openssl/err.h>  /* for error handling */
+#include <unistd.h> /* deleting mykey files */
 
 #ifndef PATH_MAX
 #define PATH_MAX 1024
@@ -52,6 +53,11 @@ static uint32_t recvCounter = 0;
 
 // Track handshake status
 static int handshakeComplete = 0;
+
+static void deleteKeyFiles(void) {
+	if (access("mykey", F_OK) == 0) unlink("mykey");
+	if (access("mykey.pub", F_OK) == 0) unlink("mykey.pub");
+}
 
 static void error(const char *msg)
 {
@@ -592,6 +598,7 @@ static gboolean shownewmessage(gpointer msg)
 
 int main(int argc, char *argv[])
 {
+	deleteKeyFiles();
 	if (init("params") != 0) {
 		fprintf(stderr, "could not read DH params from file 'params'\n");
 		return 1;
